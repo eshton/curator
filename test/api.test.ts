@@ -82,6 +82,33 @@ describe("REST /api layer", () => {
     expect(migrated.schema_version).toBe(2);
   });
 
+  test("link records across collections over the API", async () => {
+    const p = await jsonOf(await post("/api/records", { collection: "papers", content: { title: "T" } }));
+    const a = await jsonOf(await post("/api/records", { collection: "authors", content: { name: "V" } }));
+
+    const link = await post("/api/records/" + a.id + "/links", { to_id: p.id, rel: "authored", note: "primary" });
+    expect(link.status).toBe(201);
+
+    const fromAuthor = await jsonOf(await get("/api/records/" + a.id + "/links"));
+    expect(fromAuthor.links).toHaveLength(1);
+    expect(fromAuthor.links[0].direction).toBe("out");
+    expect(fromAuthor.links[0].record.id).toBe(p.id);
+
+    const fromPaper = await jsonOf(await get("/api/records/" + p.id + "/links?direction=in"));
+    expect(fromPaper.links[0].record.collection).toBe("authors");
+
+    // self-link rejected (400) and duplicate rejected (409)
+    expect((await post("/api/records/" + a.id + "/links", { to_id: a.id })).status).toBe(400);
+    expect((await post("/api/records/" + a.id + "/links", { to_id: p.id, rel: "authored" })).status).toBe(409);
+
+    const del = await fetch(base + "/api/records/" + a.id + "/links?to=" + p.id + "&rel=authored", {
+      method: "DELETE",
+      headers: origin(),
+    });
+    expect((await jsonOf(del)).removed).toBe(1);
+    expect((await jsonOf(await get("/api/records/" + a.id + "/links"))).links).toHaveLength(0);
+  });
+
   test("404 for unknown record, 409 for duplicate collection", async () => {
     expect((await get("/api/records/does-not-exist")).status).toBe(404);
     await post("/api/collections", { name: "dup" });

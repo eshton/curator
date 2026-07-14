@@ -182,6 +182,7 @@ async function openRecord(id) {
   const rec = await api("/records/" + encodeURIComponent(id));
   const { comments } = await api("/records/" + encodeURIComponent(id) + "/comments");
   const { history } = await api("/records/" + encodeURIComponent(id) + "/history");
+  const { links } = await api("/records/" + encodeURIComponent(id) + "/links");
   document.getElementById("view").innerHTML =
     '<button class="link" id="back">← back</button>' +
     '<div class="card"><div class="grid2">' +
@@ -214,6 +215,24 @@ async function openRecord(id) {
     '<div class="card"><h2>Comments</h2><div id="comments">' +
       (comments.length ? comments.map((c) => '<div class="comment"><b>' + esc(c.author ?? "anon") + '</b> <span class="muted">' + fmt(c.created_at) + "</span><br>" + esc(c.body) + "</div>").join("") : "<span class='muted'>No comments</span>") +
       "</div><div class='row' style='margin-top:8px'><input class='grow' id='cbody' placeholder='Add a comment…' /><input id='cauthor' placeholder='author' style='width:120px' /><button id='addc'>Add</button></div></div>" +
+    '<div class="card"><h2>Links</h2><div id="links">' +
+      (links.length
+        ? links.map((l) =>
+            "<div class='row' style='justify-content:space-between'>" +
+            "<div><span class='badge'>" + (l.direction === "out" ? "→ " : "← ") + esc(l.rel) + "</span> " +
+            "<button class='link openlink' data-id='" + esc(l.record.id) + "'>" + esc(l.record.collection) + " · " + short(l.record.id) + "</button>" +
+            (l.record.deleted_at ? " <span class='status-rejected'>(deleted)</span>" : "") +
+            (l.note ? " <span class='muted'>— " + esc(l.note) + "</span>" : "") + "</div>" +
+            "<button class='link rmlink' data-dir='" + l.direction + "' data-other='" + esc(l.record.id) + "' data-rel='" + esc(l.rel) + "'>remove</button>" +
+            "</div>")
+          .join("")
+        : "<span class='muted'>No links</span>") +
+      "</div><div class='row' style='margin-top:8px'>" +
+        "<input class='grow' id='ltoid' placeholder='target record id' />" +
+        "<input id='lrel' placeholder='rel (e.g. cites)' style='width:140px' />" +
+        "<input id='lnote' placeholder='note (optional)' style='width:160px' />" +
+        "<button id='addlink'>Link</button>" +
+      "</div></div>" +
     '<div class="card"><h2>History</h2>' +
       history.map((h) => "<div class='row'><span class='badge'>v" + h.version + "</span> <span class='muted'>" + fmt(h.changed_at) + " by " + esc(h.changed_by ?? "—") + "</span> <span class='" + statusClass(h.status) + "'>" + h.status + "</span></div>").join("") +
     "</div>";
@@ -225,6 +244,30 @@ async function openRecord(id) {
   document.getElementById("del").onclick = () => deleteRecord(rec.id, false);
   document.getElementById("delhard").onclick = () => deleteRecord(rec.id, true);
   document.getElementById("addc").onclick = () => addComment(rec.id);
+  document.getElementById("addlink").onclick = () => addLink(rec.id);
+  document.querySelectorAll(".openlink").forEach((n) => (n.onclick = () => openRecord(n.dataset.id)));
+  document.querySelectorAll(".rmlink").forEach((n) => (n.onclick = () => removeLink(rec.id, n.dataset)));
+}
+
+async function addLink(id) {
+  const to = document.getElementById("ltoid").value.trim();
+  if (!to) return msg("Enter a target record id", "err");
+  const rel = document.getElementById("lrel").value.trim() || undefined;
+  const note = document.getElementById("lnote").value.trim() || undefined;
+  try {
+    await api("/records/" + encodeURIComponent(id) + "/links", { method: "POST", body: JSON.stringify({ to_id: to, rel, note }) });
+    msg("Linked."); openRecord(id);
+  } catch (e) { msg(e.message, "err"); }
+}
+async function removeLink(id, data) {
+  // For outgoing links the current record is the source; for incoming it is the target.
+  const from = data.dir === "out" ? id : data.other;
+  const to = data.dir === "out" ? data.other : id;
+  if (!confirm("Remove this link?")) return;
+  try {
+    await api("/records/" + encodeURIComponent(from) + "/links?to=" + encodeURIComponent(to) + "&rel=" + encodeURIComponent(data.rel), { method: "DELETE" });
+    msg("Link removed."); openRecord(id);
+  } catch (e) { msg(e.message, "err"); }
 }
 
 function parseContent() {

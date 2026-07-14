@@ -140,6 +140,54 @@ describe("Repository", () => {
   });
 });
 
+describe("Record links", () => {
+  test("links records across collections, discoverable from both ends", () => {
+    const repo = freshRepo();
+    const paper = repo.saveRecord({ collection: "papers", content: { title: "T" } });
+    const person = repo.saveRecord({ collection: "people", content: { name: "V" } });
+    repo.linkRecords({ from_id: person.id, to_id: paper.id, rel: "authored", author: "a" });
+
+    const fromPerson = repo.listLinks(person.id);
+    expect(fromPerson).toHaveLength(1);
+    expect(fromPerson[0]!.direction).toBe("out");
+    expect(fromPerson[0]!.record.collection).toBe("papers");
+
+    const fromPaper = repo.listLinks(paper.id);
+    expect(fromPaper).toHaveLength(1);
+    expect(fromPaper[0]!.direction).toBe("in");
+    expect(fromPaper[0]!.record.collection).toBe("people");
+  });
+
+  test("rejects self-links, duplicates and missing endpoints", () => {
+    const repo = freshRepo();
+    const a = repo.saveRecord({ collection: "c", content: 1 });
+    const b = repo.saveRecord({ collection: "c", content: 2 });
+    expect(() => repo.linkRecords({ from_id: a.id, to_id: a.id })).toThrow(ValidationError);
+    expect(() => repo.linkRecords({ from_id: a.id, to_id: "missing" })).toThrow(NotFoundError);
+    repo.linkRecords({ from_id: a.id, to_id: b.id, rel: "related" });
+    expect(() => repo.linkRecords({ from_id: a.id, to_id: b.id, rel: "related" })).toThrow(
+      ConflictError,
+    );
+    // a different rel between the same pair is allowed
+    repo.linkRecords({ from_id: a.id, to_id: b.id, rel: "cites" });
+    expect(repo.listLinks(a.id, { direction: "out" })).toHaveLength(2);
+    expect(repo.listLinks(a.id, { direction: "out", rel: "cites" })).toHaveLength(1);
+  });
+
+  test("unlink and cascade on hard delete", () => {
+    const repo = freshRepo();
+    const a = repo.saveRecord({ collection: "c", content: 1 });
+    const b = repo.saveRecord({ collection: "c", content: 2 });
+    repo.linkRecords({ from_id: a.id, to_id: b.id, rel: "cites" });
+    expect(repo.unlinkRecords({ from_id: a.id, to_id: b.id }).removed).toBe(1);
+    expect(repo.listLinks(a.id)).toHaveLength(0);
+
+    repo.linkRecords({ from_id: a.id, to_id: b.id, rel: "cites" });
+    repo.deleteRecord({ id: b.id, hard: true });
+    expect(repo.listLinks(a.id)).toHaveLength(0);
+  });
+});
+
 describe("Collection schemas", () => {
   const PERSON = {
     type: "object",

@@ -3,6 +3,8 @@ import { Repository, ConflictError, NotFoundError, ValidationError } from "./rep
 import {
   addCommentShape,
   createCollectionShape,
+  linkRecordsShape,
+  listLinksShape,
   saveRecordShape,
   searchRecordsShape,
   setCollectionSchemaShape,
@@ -135,6 +137,32 @@ export async function handleApiRequest(req: Request, repo: Repository): Promise<
         if (segments[2] === "history" && method === "GET") {
           const limit = url.searchParams.get("limit");
           return jsonResponse({ history: repo.getHistory(id, limit ? Number(limit) : undefined) });
+        }
+        if (segments[2] === "links") {
+          if (method === "GET") {
+            const { direction, rel } = z
+              .object(listLinksShape)
+              .parse({
+                record_id: id,
+                direction: url.searchParams.get("direction") ?? undefined,
+                rel: url.searchParams.get("rel") ?? undefined,
+              });
+            return jsonResponse({ links: repo.listLinks(id, { direction, rel }) });
+          }
+          if (method === "POST") {
+            const a = z.object(linkRecordsShape).parse({ ...(await body(req) as object), from_id: id });
+            return jsonResponse(
+              repo.linkRecords({ from_id: a.from_id, to_id: a.to_id, rel: a.rel, note: a.note, author: a.author }),
+              201,
+            );
+          }
+          if (method === "DELETE") {
+            const to = url.searchParams.get("to");
+            if (!to) return jsonResponse({ error: "Missing 'to' query parameter" }, 400);
+            return jsonResponse(
+              repo.unlinkRecords({ from_id: id, to_id: to, rel: url.searchParams.get("rel") ?? undefined }),
+            );
+          }
         }
       }
     }

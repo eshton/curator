@@ -6,6 +6,8 @@ import type {
   Comment,
   CuratedRecord,
   HistoryEntry,
+  LinkView,
+  RecordLink,
   RecordStatus,
 } from "./schema.ts";
 
@@ -582,6 +584,125 @@ export class Repository {
       changed_by: r.changed_by,
       changed_at: r.changed_at,
     }));
+  }
+
+  // -- Links ---------------------------------------------------------------
+
+  private recordExists(id: string): boolean {
+    return !!this.db.query("SELECT 1 FROM records WHERE id = ?").get(id);
+  }
+
+  /** Create a directed, typed link between two records (any collections). */
+  linkRecords(input: {
+    from_id: string;
+    to_id: string;
+    rel?: string;
+    note?: string;
+    author?: string;
+  }): RecordLink {
+    const rel = input.rel ?? "related";
+    if (input.from_id === input.to_id) {
+      throw new ValidationError("A record cannot be linked to itself.");
+    }
+    if (!this.recordExists(input.from_id)) {
+      throw new NotFoundError(`Record "${input.from_id}" not found.`);
+    }
+    if (!this.recordExists(input.to_id)) {
+      throw new NotFoundError(`Record "${input.to_id}" not found.`);
+    }
+    const existing = this.db
+      .query(
+        "SELECT id FROM record_links WHERE from_record_id = ? AND to_record_id = ? AND rel = ?",
+      )
+      .get(input.from_id, input.to_id, rel);
+    if (existing) {
+      throw new ConflictError(`A "${rel}" link between these records already exists.`);
+    }
+    const link: RecordLink = {
+      id: newId(),
+      from_record_id: input.from_id,
+      to_record_id: input.to_id,
+      rel,
+      note: input.note ?? null,
+      created_at: nowIso(),
+      created_by: input.author ?? null,
+    };
+    this.db
+      .query(
+        `INSERT INTO record_links (id, from_record_id, to_record_id, rel, note, created_at, created_by)
+         VALUES ($id, $from, $to, $rel, $note, $created_at, $by)`,
+      )
+      .run({
+        $id: link.id,
+        $from: link.from_record_id,
+        $to: link.to_record_id,
+        $rel: link.rel,
+        $note: link.note,
+        $created_at: link.created_at,
+        $by: link.created_by,
+      });
+    return link;
+  }
+
+  /** Remove links from→to. If `rel` is given, only that relationship. */
+  unlinkRecords(input: { from_id: string; to_id: string; rel?: string }): { removed: number } {
+    const res = input.rel
+      ? this.db
+          .query("DELETE FROM record_links WHERE from_record_id = ? AND to_record_id = ? AND rel = ?")
+          .run(input.from_id, input.to_id, input.rel)
+      : this.db
+          .query("DELETE FROM record_links WHERE from_record_id = ? AND to_record_id = ?")
+          .run(input.from_id, input.to_id);
+    return { removed: res.changes };
+  }
+
+  /** List a record's links (outgoing and/or incoming), each with the other record inlined. */
+  listLinks(
+    recordId: string,
+    opts: { direction?: "out" | "in" | "both"; rel?: string } = {},
+  ): LinkView[] {
+    if (!this.recordExists(recordId)) {
+      throw new NotFoundError(`Record "${recordId}" not found.`);
+    }
+    const direction = opts.direction ?? "both";
+    const out: LinkView[] = [];
+
+    const collect = (dir: "out" | "in") => {
+      const selfCol = dir === "out" ? "from_record_id" : "to_record_id";
+      const otherCol = dir === "out" ? "to_record_id" : "from_record_id";
+      const params: unknown[] = [recordId];
+      let sql = `SELECT id, ${otherCol} AS other, rel, note, created_at, created_by FROM record_links WHERE ${selfCol} = ?`;
+      if (opts.rel) {
+        sql += " AND rel = ?";
+        params.push(opts.rel);
+      }
+      sql += " ORDER BY created_at ASC";
+      const rows = this.db.query(sql).all(...(params as never[])) as {
+        id: string;
+        other: string;
+        rel: string;
+        note: string | null;
+        created_at: string;
+        created_by: string | null;
+      }[];
+      for (const row of rows) {
+        const record = this.getRecord(row.other);
+        if (!record) continue; // endpoint gone (should not happen due to cascade)
+        out.push({
+          link_id: row.id,
+          rel: row.rel,
+          direction: dir,
+          note: row.note,
+          created_at: row.created_at,
+          created_by: row.created_by,
+          record,
+        });
+      }
+    };
+
+    if (direction === "out" || direction === "both") collect("out");
+    if (direction === "in" || direction === "both") collect("in");
+    return out;
   }
 
   // -- Internal helpers ----------------------------------------------------

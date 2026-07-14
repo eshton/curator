@@ -16,8 +16,10 @@ collaborate through the shared store.
 - **Metadata is automatic** — agents supply data; Curator manages provenance and versioning.
 - **Optional per-collection schemas** — attach a JSON Schema to a collection and records are
   validated on write. Schemas are versioned and evolvable (see below).
-- **Built-in web UI** — browse, search, edit, comment on, and manage curated data and schemas
-  from the browser at `http://127.0.0.1:3737/`.
+- **Built-in web UI** — browse, search, edit, comment on, link, and manage curated data and
+  schemas from the browser at `http://127.0.0.1:3737/`.
+- **Links between records** — connect records with directed, typed relationships, including
+  across collections (a `person` can link to a `paper`).
 
 ## Requirements
 
@@ -81,6 +83,9 @@ If you started the daemon with a token, `curator mcp-config` includes the requir
 | `set_collection_schema` | Attach or evolve a collection's JSON Schema (appends a new version). |
 | `get_collection_schema` | Fetch the current (or a specific) schema version, plus the version list. |
 | `migrate_record` | Bring a record up to the collection's current schema version. |
+| `link_records` | Create a directed, typed link between two records (any collections). |
+| `unlink_records` | Remove links between two records (optionally one relationship). |
+| `list_links` | List a record's links (incoming/outgoing) with the linked record inlined. |
 
 ### Record shape
 
@@ -112,6 +117,15 @@ was written against and keeps validating against that version — an untouched o
 never retroactively invalidated. Writes (save/update) validate against the *current* version;
 `migrate_record` brings an old record up to the latest schema on demand (optionally supplying
 replacement content to satisfy new requirements).
+
+## Linking records
+
+Records can be connected with **directed, typed links** that reference record ids, so they
+work **across collections** with no special handling. Each link has a relationship label
+`rel` (e.g. `cites`, `supersedes`, `derived_from`; defaults to `related`) and an optional
+note. `list_links` returns a record's links from both directions with the linked record
+inlined, so a relationship is visible from either endpoint. Self-links are rejected, a
+`(from, to, rel)` triple is unique, and hard-deleting a record removes its links.
 
 ## Web UI
 

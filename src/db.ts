@@ -26,7 +26,7 @@ export function openDatabase(dbPath: string): Database {
 }
 
 /** Current target schema version. Bump when adding a migration step. */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 function migrate(db: Database): void {
   const row = db.query("PRAGMA user_version;").get() as { user_version: number };
@@ -132,5 +132,29 @@ function migrate(db: Database): void {
       db.exec(`PRAGMA user_version = 2;`);
     })();
     version = 2;
+  }
+
+  if (version < 3) {
+    db.transaction(() => {
+      db.exec(`
+        -- Directed, typed links between records. Because links reference record
+        -- ids only, they cross collections ("entity types") freely. Cascades
+        -- when either endpoint is hard-deleted.
+        CREATE TABLE record_links (
+          id             TEXT PRIMARY KEY,
+          from_record_id TEXT NOT NULL REFERENCES records(id) ON DELETE CASCADE,
+          to_record_id   TEXT NOT NULL REFERENCES records(id) ON DELETE CASCADE,
+          rel            TEXT NOT NULL DEFAULT 'related',
+          note           TEXT,
+          created_at     TEXT NOT NULL,
+          created_by     TEXT,
+          UNIQUE(from_record_id, to_record_id, rel)
+        );
+        CREATE INDEX idx_links_from ON record_links(from_record_id);
+        CREATE INDEX idx_links_to   ON record_links(to_record_id);
+      `);
+      db.exec(`PRAGMA user_version = 3;`);
+    })();
+    version = 3;
   }
 }

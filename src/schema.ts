@@ -87,6 +87,28 @@ export interface Comment {
   created_at: string;
 }
 
+export interface RecordLink {
+  id: string;
+  from_record_id: string;
+  to_record_id: string;
+  rel: string;
+  note: string | null;
+  created_at: string;
+  created_by: string | null;
+}
+
+/** A link as seen from one record's perspective, with the other record inlined. */
+export interface LinkView {
+  link_id: string;
+  rel: string;
+  /** "out" = this record -> record; "in" = record -> this record. */
+  direction: "out" | "in";
+  note: string | null;
+  created_at: string;
+  created_by: string | null;
+  record: CuratedRecord;
+}
+
 export interface HistoryEntry {
   id: string;
   record_id: string;
@@ -222,4 +244,39 @@ export const listCommentsShape = {
 export const getHistoryShape = {
   record_id: z.string().min(1),
   limit: z.number().int().min(1).max(200).default(50),
+} as const;
+
+const relSchema = z
+  .string()
+  .min(1)
+  .max(120)
+  .regex(
+    /^[a-zA-Z0-9._-]+$/,
+    "Relationship labels may contain letters, numbers, dot, underscore and hyphen.",
+  )
+  .describe('Relationship label, e.g. "cites", "supersedes", "derived_from". Defaults to "related".');
+
+export const linkRecordsShape = {
+  from_id: z.string().min(1).describe("Source record id."),
+  to_id: z.string().min(1).describe("Target record id (may be in any collection)."),
+  rel: relSchema.default("related"),
+  note: z.string().max(2000).optional(),
+  author: authorSchema.optional(),
+} as const;
+
+export const unlinkRecordsShape = {
+  from_id: z.string().min(1),
+  to_id: z.string().min(1),
+  rel: relSchema
+    .optional()
+    .describe("If given, remove only this relationship; otherwise remove all links from→to."),
+} as const;
+
+export const listLinksShape = {
+  record_id: z.string().min(1),
+  direction: z
+    .enum(["out", "in", "both"])
+    .default("both")
+    .describe('"out" = links from this record, "in" = links to it, "both" = all.'),
+  rel: relSchema.optional().describe("Filter to a single relationship label."),
 } as const;

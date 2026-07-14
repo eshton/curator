@@ -8,12 +8,15 @@ import {
   getCollectionSchemaShape,
   getHistoryShape,
   getRecordShape,
+  linkRecordsShape,
   listCommentsShape,
   listCollectionsShape,
+  listLinksShape,
   migrateRecordShape,
   saveRecordShape,
   searchRecordsShape,
   setCollectionSchemaShape,
+  unlinkRecordsShape,
   updateRecordShape,
 } from "./schema.ts";
 
@@ -248,6 +251,43 @@ export function createMcpServer(repo: Repository): McpServer {
       annotations: { readOnlyHint: true },
     },
     guard((a) => ({ history: repo.getHistory(a.record_id, a.limit) })),
+  );
+
+  server.registerTool(
+    "link_records",
+    {
+      title: "Link records",
+      description:
+        'Create a directed, typed link between two records. Records may be in different collections. `rel` labels the relationship (e.g. "cites", "supersedes", "derived_from"; defaults to "related").',
+      inputSchema: linkRecordsShape,
+    },
+    guard((a) =>
+      repo.linkRecords({ from_id: a.from_id, to_id: a.to_id, rel: a.rel, note: a.note, author: a.author }),
+    ),
+  );
+
+  server.registerTool(
+    "unlink_records",
+    {
+      title: "Unlink records",
+      description:
+        "Remove links from one record to another. If `rel` is given, only that relationship is removed; otherwise all links between them (in that direction) are removed.",
+      inputSchema: unlinkRecordsShape,
+      annotations: { destructiveHint: true },
+    },
+    guard((a) => repo.unlinkRecords({ from_id: a.from_id, to_id: a.to_id, rel: a.rel })),
+  );
+
+  server.registerTool(
+    "list_links",
+    {
+      title: "List record links",
+      description:
+        "List a record's links with the linked record inlined. Returns both outgoing and incoming links by default; filter with `direction` and/or `rel`.",
+      inputSchema: listLinksShape,
+      annotations: { readOnlyHint: true },
+    },
+    guard((a) => ({ links: repo.listLinks(a.record_id, { direction: a.direction, rel: a.rel }) })),
   );
 
   return server;

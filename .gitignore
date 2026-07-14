@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.log
+
+# Local Curator data / runtime state (never commit curated data or daemon state)
+.curator/
+*.db
+*.db-wal
+*.db-shm

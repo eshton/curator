@@ -20,6 +20,9 @@ collaborate through the shared store.
   schemas from the browser at `http://127.0.0.1:3737/`.
 - **Links between records** — connect records with directed, typed relationships, including
   across collections (a `person` can link to a `paper`).
+- **Built-in curation agent** — point it at any OpenAI-compatible model endpoint and give it a
+  task; it runs in the background, searches/reads the web, and records its findings into
+  Curator through the MCP (it's just another agent).
 
 ## Requirements
 
@@ -117,6 +120,44 @@ was written against and keeps validating against that version — an untouched o
 never retroactively invalidated. Writes (save/update) validate against the *current* version;
 `migrate_record` brings an old record up to the latest schema on demand (optionally supplying
 replacement content to satisfy new requirements).
+
+## Curation agent
+
+Curator ships an autonomous agent that curates data for you. Give it a **task** and an
+**OpenAI-compatible model endpoint** and it runs in the background: it connects to the daemon
+as an MCP client, is offered the curation tools plus web tools, and drives a tool-use loop —
+recording its findings into Curator as it goes. Because it records through the MCP, it's just
+another collaborating agent.
+
+```bash
+# Start a background agent (auto-starts the daemon if needed)
+curator agent run \
+  --task "Curate the key claims of the 2017 'Attention Is All You Need' paper, with sources" \
+  --model-url https://api.openai.com/v1 \
+  --model gpt-4o-mini \
+  --model-key "$OPENAI_API_KEY" \
+  --collection papers
+
+curator agent list          # see runs and their status
+curator agent logs <id>     # watch what it's doing
+curator agent stop <id>     # stop a run
+```
+
+The `--model-url` is any OpenAI-compatible base URL, so this works with **local** models too
+(Ollama, llama.cpp, vLLM, LM Studio) for a fully private setup — e.g.
+`--model-url http://localhost:11434/v1 --model llama3.1` (no key needed).
+
+**Web tools.** The agent always has `web_fetch` (fetch + extract a URL). To enable
+`web_search`, provide a search API key:
+
+```bash
+export CURATOR_SEARCH_PROVIDER=tavily   # or: brave
+export CURATOR_SEARCH_API_KEY=…
+```
+
+**Safety.** Runs are bounded by `--max-steps` (default 20). The daemon and store stay
+local-only; the agent's *only* outbound calls are to the model endpoint and the web you point
+it at. API keys are passed via flags/env and are never written to the run metadata.
 
 ## Linking records
 

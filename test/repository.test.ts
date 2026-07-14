@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { openDatabase } from "../src/db.ts";
-import { Repository, ConflictError, NotFoundError } from "../src/repository.ts";
+import { Repository, ConflictError, NotFoundError, ValidationError } from "../src/repository.ts";
 
 function freshRepo(): Repository {
   return new Repository(openDatabase(":memory:"));
@@ -137,5 +137,96 @@ describe("Repository", () => {
     const comments = repo.listComments(r.id);
     expect(comments.map((c) => c.body)).toEqual(["first", "second"]);
     expect(() => repo.addComment({ record_id: "nope", body: "x" })).toThrow(NotFoundError);
+  });
+});
+
+describe("Collection schemas", () => {
+  const PERSON = {
+    type: "object",
+    required: ["name"],
+    properties: { name: { type: "string" }, age: { type: "integer" } },
+    additionalProperties: true,
+  };
+
+  test("schemaless collections accept any content", () => {
+    const repo = freshRepo();
+    const r = repo.saveRecord({ collection: "free", content: { whatever: [1, 2, 3] } });
+    expect(r.schema_version).toBeNull();
+  });
+
+  test("a schema enforces content on save and stamps schema_version", () => {
+    const repo = freshRepo();
+    repo.createCollection("people", undefined, PERSON);
+    const ok = repo.saveRecord({ collection: "people", content: { name: "Ada", age: 36 } });
+    expect(ok.schema_version).toBe(1);
+    expect(() => repo.saveRecord({ collection: "people", content: { age: "x" } })).toThrow(
+      ValidationError,
+    );
+  });
+
+  test("invalid JSON Schema is rejected", () => {
+    const repo = freshRepo();
+    expect(() => repo.setCollectionSchema("bad", { type: "not-a-type" })).toThrow(ValidationError);
+  });
+
+  test("versioned + lazy evolution: old records keep their version, new writes use latest", () => {
+    const repo = freshRepo();
+    repo.createCollection("people", undefined, PERSON);
+    const old = repo.saveRecord({ collection: "people", content: { name: "Ada" } });
+    expect(old.schema_version).toBe(1);
+
+    // v2 requires email
+    const v2 = repo.setCollectionSchema("people", {
+      type: "object",
+      required: ["name", "email"],
+      properties: { name: { type: "string" }, email: { type: "string" } },
+    });
+    expect(v2.version).toBe(2);
+
+    // untouched old record still reads, still at v1
+    expect(repo.getRecord(old.id)?.schema_version).toBe(1);
+
+    // new save must satisfy v2
+    expect(() => repo.saveRecord({ collection: "people", content: { name: "Bob" } })).toThrow(
+      ValidationError,
+    );
+    const fresh = repo.saveRecord({ collection: "people", content: { name: "Bob", email: "b@x" } });
+    expect(fresh.schema_version).toBe(2);
+
+    // history of schema versions
+    expect(repo.listCollectionSchemas("people").map((s) => s.version)).toEqual([2, 1]);
+    expect(repo.getCollectionSchema("people")?.version).toBe(2);
+    expect(repo.getCollectionSchema("people", 1)?.version).toBe(1);
+  });
+
+  test("migrate_record brings an old record up to the current schema", () => {
+    const repo = freshRepo();
+    repo.createCollection("people", undefined, PERSON);
+    const old = repo.saveRecord({ collection: "people", content: { name: "Ada" } });
+    repo.setCollectionSchema("people", {
+      type: "object",
+      required: ["name", "email"],
+      properties: { name: { type: "string" }, email: { type: "string" } },
+    });
+    // cannot migrate without satisfying the new schema
+    expect(() => repo.migrateRecord({ id: old.id })).toThrow(ValidationError);
+    const migrated = repo.migrateRecord({ id: old.id, content: { name: "Ada", email: "a@x" } });
+    expect(migrated.schema_version).toBe(2);
+    expect(migrated.version).toBe(2);
+  });
+
+  test("editing an old record must satisfy the current schema", () => {
+    const repo = freshRepo();
+    repo.createCollection("people", undefined, PERSON);
+    const old = repo.saveRecord({ collection: "people", content: { name: "Ada" } });
+    repo.setCollectionSchema("people", {
+      type: "object",
+      required: ["name", "email"],
+      properties: { name: { type: "string" }, email: { type: "string" } },
+    });
+    // a plain update now validates against v2
+    expect(() => repo.updateRecord({ id: old.id, status: "verified" })).toThrow(ValidationError);
+    const ok = repo.updateRecord({ id: old.id, content: { name: "Ada", email: "a@x" } });
+    expect(ok.schema_version).toBe(2);
   });
 });

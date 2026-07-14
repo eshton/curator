@@ -49,6 +49,18 @@ export interface Collection {
   name: string;
   description: string | null;
   created_at: string;
+  /** Active JSON Schema version, or null if the collection is free-form. */
+  current_schema_version: number | null;
+}
+
+/** One append-only version of a collection's JSON Schema. */
+export interface CollectionSchemaVersion {
+  id: string;
+  collection_id: string;
+  version: number;
+  schema: unknown;
+  created_at: string;
+  created_by: string | null;
 }
 
 export interface CuratedRecord {
@@ -59,6 +71,7 @@ export interface CuratedRecord {
   status: RecordStatus;
   tags: string[];
   version: number;
+  schema_version: number | null;
   created_at: string;
   updated_at: string;
   created_by: string | null;
@@ -90,6 +103,13 @@ export interface HistoryEntry {
 // Tool input shapes (ZodRawShape objects consumed by registerTool)
 // ---------------------------------------------------------------------------
 
+/** A JSON Schema document (an object). Structural validity is checked at runtime by Ajv. */
+export const jsonSchemaSchema = z
+  .record(z.string(), z.unknown())
+  .describe(
+    "A JSON Schema document describing the shape records in this collection must satisfy.",
+  );
+
 export const createCollectionShape = {
   name: z
     .string()
@@ -101,9 +121,36 @@ export const createCollectionShape = {
     )
     .describe("Unique name for the collection (namespace/topic)."),
   description: z.string().max(2000).optional(),
+  schema: jsonSchemaSchema
+    .optional()
+    .describe("Optional JSON Schema. If given, records saved here must validate against it."),
 } as const;
 
 export const listCollectionsShape = {} as const;
+
+export const setCollectionSchemaShape = {
+  collection: z.string().min(1).max(120).describe("Collection to attach/evolve the schema on."),
+  schema: jsonSchemaSchema,
+  author: authorSchema.optional(),
+} as const;
+
+export const getCollectionSchemaShape = {
+  collection: z.string().min(1).max(120),
+  version: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Specific schema version to fetch. Defaults to the current version."),
+} as const;
+
+export const migrateRecordShape = {
+  id: z.string().min(1),
+  content: contentSchema
+    .optional()
+    .describe("Replacement content. Omit to re-validate the existing content against the latest schema."),
+  author: authorSchema.optional(),
+} as const;
 
 export const saveRecordShape = {
   collection: z

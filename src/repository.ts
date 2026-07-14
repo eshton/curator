@@ -1,6 +1,8 @@
 import type { Database } from "bun:sqlite";
+import { Ajv, type ValidateFunction } from "ajv";
 import type {
   Collection,
+  CollectionSchemaVersion,
   Comment,
   CuratedRecord,
   HistoryEntry,
@@ -23,6 +25,14 @@ export class ConflictError extends Error {
   }
 }
 
+/** Raised when content fails validation against its collection's JSON Schema. */
+export class ValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ValidationError";
+  }
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -39,6 +49,7 @@ interface RecordRow {
   status: string;
   tags: string;
   version: number;
+  schema_version: number | null;
   created_at: string;
   updated_at: string;
   created_by: string | null;
@@ -48,7 +59,7 @@ interface RecordRow {
 
 const RECORD_SELECT =
   "SELECT r.id, c.name AS collection, r.content, r.source, r.status, r.tags, " +
-  "r.version, r.created_at, r.updated_at, r.created_by, r.updated_by, r.deleted_at " +
+  "r.version, r.schema_version, r.created_at, r.updated_at, r.created_by, r.updated_by, r.deleted_at " +
   "FROM records r JOIN collections c ON c.id = r.collection_id";
 
 /**
@@ -58,56 +69,188 @@ const RECORD_SELECT =
  * directly.
  */
 export class Repository {
+  private readonly ajv = new Ajv({ allErrors: true, strict: false });
+  /** Compiled-validator cache, keyed by `${collectionId}:${version}` (schemas are immutable per version). */
+  private readonly validators = new Map<string, ValidateFunction>();
+
   constructor(private readonly db: Database) {}
 
   // -- Collections ---------------------------------------------------------
 
-  createCollection(name: string, description?: string): Collection {
+  createCollection(name: string, description?: string, schema?: unknown): Collection {
     const existing = this.db
       .query("SELECT id FROM collections WHERE name = ?")
       .get(name);
     if (existing) {
       throw new ConflictError(`Collection "${name}" already exists.`);
     }
-    const col: Collection = {
-      id: newId(),
-      name,
-      description: description ?? null,
-      created_at: nowIso(),
-    };
+    const id = newId();
     this.db
       .query(
         "INSERT INTO collections (id, name, description, created_at) VALUES ($id, $name, $description, $created_at)",
       )
-      .run({
-        $id: col.id,
-        $name: col.name,
-        $description: col.description,
-        $created_at: col.created_at,
-      });
-    return col;
+      .run({ $id: id, $name: name, $description: description ?? null, $created_at: nowIso() });
+    if (schema !== undefined) {
+      this.setCollectionSchema(name, schema);
+    }
+    return this.getCollection(name)!;
   }
 
-  /** Return the collection id for `name`, creating the collection if needed. */
-  private ensureCollectionId(name: string): string {
+  getCollection(name: string): (Collection & { record_count: number }) | null {
     const row = this.db
-      .query("SELECT id FROM collections WHERE name = ?")
-      .get(name) as { id: string } | null;
-    if (row) return row.id;
-    const col = this.createCollection(name);
-    return col.id;
+      .query(
+        `SELECT c.id, c.name, c.description, c.created_at, c.current_schema_version,
+                (SELECT count(*) FROM records r
+                   WHERE r.collection_id = c.id AND r.deleted_at IS NULL) AS record_count
+         FROM collections c WHERE c.name = ?`,
+      )
+      .get(name) as (Collection & { record_count: number }) | null;
+    return row ?? null;
+  }
+
+  /** Return the collection id (and current schema version) for `name`, creating it if needed. */
+  private ensureCollection(name: string): { id: string; current_schema_version: number | null } {
+    const row = this.db
+      .query("SELECT id, current_schema_version FROM collections WHERE name = ?")
+      .get(name) as { id: string; current_schema_version: number | null } | null;
+    if (row) return row;
+    this.createCollection(name);
+    return this.db
+      .query("SELECT id, current_schema_version FROM collections WHERE name = ?")
+      .get(name) as { id: string; current_schema_version: number | null };
   }
 
   listCollections(): (Collection & { record_count: number })[] {
     const rows = this.db
       .query(
-        `SELECT c.id, c.name, c.description, c.created_at,
+        `SELECT c.id, c.name, c.description, c.created_at, c.current_schema_version,
                 (SELECT count(*) FROM records r
                    WHERE r.collection_id = c.id AND r.deleted_at IS NULL) AS record_count
          FROM collections c ORDER BY c.name`,
       )
       .all() as (Collection & { record_count: number })[];
     return rows;
+  }
+
+  // -- Collection schemas --------------------------------------------------
+
+  /** Attach or evolve a collection's JSON Schema. Appends a new immutable version. */
+  setCollectionSchema(
+    name: string,
+    schema: unknown,
+    author?: string,
+  ): CollectionSchemaVersion {
+    // Reject structurally invalid schemas up-front.
+    try {
+      this.ajv.compile(schema as object);
+    } catch (err) {
+      throw new ValidationError(
+        `Invalid JSON Schema: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    let result!: CollectionSchemaVersion;
+    this.db.transaction(() => {
+      const col = this.ensureCollection(name);
+      const maxRow = this.db
+        .query("SELECT COALESCE(MAX(version), 0) AS v FROM collection_schemas WHERE collection_id = ?")
+        .get(col.id) as { v: number };
+      const version = maxRow.v + 1;
+      const entry: CollectionSchemaVersion = {
+        id: newId(),
+        collection_id: col.id,
+        version,
+        schema,
+        created_at: nowIso(),
+        created_by: author ?? null,
+      };
+      this.db
+        .query(
+          `INSERT INTO collection_schemas (id, collection_id, version, schema, created_at, created_by)
+           VALUES ($id, $cid, $version, $schema, $created_at, $by)`,
+        )
+        .run({
+          $id: entry.id,
+          $cid: col.id,
+          $version: version,
+          $schema: JSON.stringify(schema),
+          $created_at: entry.created_at,
+          $by: entry.created_by,
+        });
+      this.db
+        .query("UPDATE collections SET current_schema_version = ? WHERE id = ?")
+        .run(version, col.id);
+      result = entry;
+    })();
+    return result;
+  }
+
+  getCollectionSchema(name: string, version?: number): CollectionSchemaVersion | null {
+    const col = this.db
+      .query("SELECT id, current_schema_version FROM collections WHERE name = ?")
+      .get(name) as { id: string; current_schema_version: number | null } | null;
+    if (!col) throw new NotFoundError(`Collection "${name}" not found.`);
+    const wanted = version ?? col.current_schema_version;
+    if (wanted == null) return null;
+    const row = this.db
+      .query(
+        "SELECT id, collection_id, version, schema, created_at, created_by FROM collection_schemas WHERE collection_id = ? AND version = ?",
+      )
+      .get(col.id, wanted) as
+      | { id: string; collection_id: string; version: number; schema: string; created_at: string; created_by: string | null }
+      | null;
+    return row ? { ...row, schema: safeParse(row.schema) } : null;
+  }
+
+  listCollectionSchemas(name: string): CollectionSchemaVersion[] {
+    const col = this.db.query("SELECT id FROM collections WHERE name = ?").get(name) as
+      | { id: string }
+      | null;
+    if (!col) throw new NotFoundError(`Collection "${name}" not found.`);
+    const rows = this.db
+      .query(
+        "SELECT id, collection_id, version, schema, created_at, created_by FROM collection_schemas WHERE collection_id = ? ORDER BY version DESC",
+      )
+      .all(col.id) as {
+      id: string;
+      collection_id: string;
+      version: number;
+      schema: string;
+      created_at: string;
+      created_by: string | null;
+    }[];
+    return rows.map((r) => ({ ...r, schema: safeParse(r.schema) }));
+  }
+
+  /**
+   * Validate `content` against a collection's schema version. No-op (returns
+   * null) if the version is null (schemaless). Throws ValidationError on
+   * failure. Returns the schema version the content was validated against.
+   */
+  private validateContent(
+    collectionId: string,
+    schemaVersion: number | null,
+    content: unknown,
+  ): number | null {
+    if (schemaVersion == null) return null;
+    const key = `${collectionId}:${schemaVersion}`;
+    let validate = this.validators.get(key);
+    if (!validate) {
+      const row = this.db
+        .query("SELECT schema FROM collection_schemas WHERE collection_id = ? AND version = ?")
+        .get(collectionId, schemaVersion) as { schema: string } | null;
+      if (!row) return schemaVersion; // schema row missing; do not block writes
+      validate = this.ajv.compile(safeParse(row.schema) as object);
+      this.validators.set(key, validate);
+    }
+    if (!validate(content)) {
+      const details = (validate.errors ?? [])
+        .map((e) => `${e.instancePath || "(root)"} ${e.message}`)
+        .join("; ");
+      throw new ValidationError(
+        `Content does not match schema v${schemaVersion} for this collection: ${details}`,
+      );
+    }
+    return schemaVersion;
   }
 
   // -- Records -------------------------------------------------------------
@@ -129,22 +272,28 @@ export class Repository {
     const tagsJson = JSON.stringify(tags);
 
     const tx = this.db.transaction(() => {
-      const collectionId = this.ensureCollectionId(input.collection);
+      const col = this.ensureCollection(input.collection);
+      const schemaVersion = this.validateContent(
+        col.id,
+        col.current_schema_version,
+        input.content ?? null,
+      );
       this.db
         .query(
           `INSERT INTO records
-             (id, collection_id, content, source, status, tags, version,
+             (id, collection_id, content, source, status, tags, version, schema_version,
               created_at, updated_at, created_by, updated_by, deleted_at)
-           VALUES ($id, $cid, $content, $source, $status, $tags, 1,
+           VALUES ($id, $cid, $content, $source, $status, $tags, 1, $schema_version,
                    $now, $now, $author, $author, NULL)`,
         )
         .run({
           $id: id,
-          $cid: collectionId,
+          $cid: col.id,
           $content: contentJson,
           $source: input.source ?? null,
           $status: status,
           $tags: tagsJson,
+          $schema_version: schemaVersion,
           $now: now,
           $author: author,
         });
@@ -197,11 +346,18 @@ export class Repository {
       const contentJson = JSON.stringify(content ?? null);
       const tagsJson = JSON.stringify(tags);
 
+      // A write validates against the collection's CURRENT schema and re-stamps
+      // the record to that version (lazy migration: untouched records keep their
+      // old version; editing brings a record up to the latest schema).
+      const col = this.ensureCollection(current.collection);
+      const schemaVersion = this.validateContent(col.id, col.current_schema_version, content);
+
       this.db
         .query(
           `UPDATE records
              SET content = $content, source = $source, status = $status,
-                 tags = $tags, version = $version, updated_at = $now, updated_by = $author
+                 tags = $tags, version = $version, schema_version = $schema_version,
+                 updated_at = $now, updated_by = $author
            WHERE id = $id`,
         )
         .run({
@@ -210,6 +366,7 @@ export class Repository {
           $status: status,
           $tags: tagsJson,
           $version: nextVersion,
+          $schema_version: schemaVersion,
           $now: now,
           $author: author,
           $id: input.id,
@@ -218,6 +375,59 @@ export class Repository {
       this.ftsIndex(input.id, contentJson, source, tagsJson);
     });
     tx();
+    return this.getRecord(input.id)!;
+  }
+
+  /**
+   * Bring a record up to its collection's current schema version (lazy
+   * migration, on demand). Optionally replace content; then validate against
+   * the latest schema and re-stamp `schema_version`. Throws ValidationError if
+   * the (new or existing) content does not satisfy the current schema.
+   */
+  migrateRecord(input: { id: string; content?: unknown; author?: string }): CuratedRecord {
+    this.db.transaction(() => {
+      const current = this.getRecord(input.id);
+      if (!current) throw new NotFoundError(`Record "${input.id}" not found.`);
+      if (current.deleted_at) {
+        throw new ConflictError(`Record "${input.id}" is deleted and cannot be migrated.`);
+      }
+      const col = this.ensureCollection(current.collection);
+      const content = input.content !== undefined ? input.content : current.content;
+      const schemaVersion = this.validateContent(col.id, col.current_schema_version, content);
+
+      const contentChanged = input.content !== undefined;
+      const schemaChanged = schemaVersion !== current.schema_version;
+      if (!contentChanged && !schemaChanged) return; // already current, nothing to do
+
+      const now = nowIso();
+      const nextVersion = current.version + 1;
+      const contentJson = JSON.stringify(content ?? null);
+      const tagsJson = JSON.stringify(current.tags);
+      this.db
+        .query(
+          `UPDATE records SET content = $content, schema_version = $schema_version,
+             version = $version, updated_at = $now, updated_by = $author WHERE id = $id`,
+        )
+        .run({
+          $content: contentJson,
+          $schema_version: schemaVersion,
+          $version: nextVersion,
+          $now: now,
+          $author: input.author ?? null,
+          $id: input.id,
+        });
+      this.writeHistory(
+        input.id,
+        nextVersion,
+        contentJson,
+        current.source,
+        current.status,
+        tagsJson,
+        input.author ?? null,
+        now,
+      );
+      this.ftsIndex(input.id, contentJson, current.source, tagsJson);
+    })();
     return this.getRecord(input.id)!;
   }
 
@@ -435,6 +645,7 @@ function mapRecord(row: RecordRow): CuratedRecord {
     status: row.status as RecordStatus,
     tags: safeParse(row.tags) as string[],
     version: row.version,
+    schema_version: row.schema_version,
     created_at: row.created_at,
     updated_at: row.updated_at,
     created_by: row.created_by,

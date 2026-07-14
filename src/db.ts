@@ -26,7 +26,7 @@ export function openDatabase(dbPath: string): Database {
 }
 
 /** Current target schema version. Bump when adding a migration step. */
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 function migrate(db: Database): void {
   const row = db.query("PRAGMA user_version;").get() as { user_version: number };
@@ -100,8 +100,37 @@ function migrate(db: Database): void {
           UPDATE records SET updated_at = datetime('now') WHERE id = NEW.id;
         END;
       `);
-      db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`);
+      db.exec(`PRAGMA user_version = 1;`);
     })();
-    version = SCHEMA_VERSION;
+    version = 1;
+  }
+
+  if (version < 2) {
+    db.transaction(() => {
+      db.exec(`
+        -- Optional, versioned JSON Schema per collection. Append-only: each
+        -- change inserts a new row with an incremented version, mirroring how
+        -- record_history preserves record versions.
+        CREATE TABLE collection_schemas (
+          id            TEXT PRIMARY KEY,
+          collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+          version       INTEGER NOT NULL,
+          schema        TEXT NOT NULL,        -- JSON Schema document
+          created_at    TEXT NOT NULL,
+          created_by    TEXT,
+          UNIQUE(collection_id, version)
+        );
+        CREATE INDEX idx_collection_schemas_collection ON collection_schemas(collection_id);
+
+        -- Active schema version for the collection (NULL = schemaless / free-form).
+        ALTER TABLE collections ADD COLUMN current_schema_version INTEGER;
+
+        -- The collection schema version each record was validated against at
+        -- write time (NULL = written while the collection was schemaless).
+        ALTER TABLE records ADD COLUMN schema_version INTEGER;
+      `);
+      db.exec(`PRAGMA user_version = 2;`);
+    })();
+    version = 2;
   }
 }

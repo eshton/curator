@@ -14,6 +14,10 @@ collaborate through the shared store.
 - **Agent-first** — a clean MCP tool surface for saving, searching, updating, commenting on,
   and inspecting the history of curated records.
 - **Metadata is automatic** — agents supply data; Curator manages provenance and versioning.
+- **Optional per-collection schemas** — attach a JSON Schema to a collection and records are
+  validated on write. Schemas are versioned and evolvable (see below).
+- **Built-in web UI** — browse, search, edit, comment on, and manage curated data and schemas
+  from the browser at `http://127.0.0.1:3737/`.
 
 ## Requirements
 
@@ -73,6 +77,10 @@ If you started the daemon with a token, `curator mcp-config` includes the requir
 | `delete_record` | Soft-delete (recoverable, keeps history) or `hard` delete. |
 | `add_comment` / `list_comments` | Collaborate with review notes on a record. |
 | `get_history` | Inspect the append-only version history of a record. |
+| `create_collection` | May take an optional JSON Schema. |
+| `set_collection_schema` | Attach or evolve a collection's JSON Schema (appends a new version). |
+| `get_collection_schema` | Fetch the current (or a specific) schema version, plus the version list. |
+| `migrate_record` | Bring a record up to the collection's current schema version. |
 
 ### Record shape
 
@@ -85,11 +93,34 @@ If you started the daemon with a token, `curator mcp-config` includes the requir
   "status": "draft",              // draft | verified | rejected
   "tags": ["ml", "nlp"],
   "version": 1,
+  "schema_version": 1,           // collection schema version validated against (null if schemaless)
   "created_at": "…", "updated_at": "…",
   "created_by": "agent-a", "updated_by": "agent-a",
   "deleted_at": null
 }
 ```
+
+## Schemas & evolution
+
+A collection may carry an **optional JSON Schema**. If it does, `save_record` and
+`update_record` reject content that doesn't validate; collections without a schema stay
+free-form. Schemas are **versioned and append-only**: `set_collection_schema` adds a new
+version and makes it current, so evolving a schema never rewrites history.
+
+Existing records are handled **lazily**: each record is stamped with the `schema_version` it
+was written against and keeps validating against that version — an untouched old record is
+never retroactively invalidated. Writes (save/update) validate against the *current* version;
+`migrate_record` brings an old record up to the latest schema on demand (optionally supplying
+replacement content to satisfy new requirements).
+
+## Web UI
+
+The daemon serves an interactive UI at `http://127.0.0.1:<port>/` (same process, same
+loopback/Origin security). Browse collections, full-text search, create/edit records, change
+status and tags, add comments, view version history, soft/hard delete, and create or evolve
+collection schemas. It's a single self-contained page backed by a read/write `/api/*` JSON
+layer over the same store. If the daemon was started with `--token`, the UI prompts for it and
+remembers it locally.
 
 ## Collaboration & concurrency
 

@@ -1,16 +1,19 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { Repository, ConflictError, NotFoundError } from "./repository.ts";
+import { Repository, ConflictError, NotFoundError, ValidationError } from "./repository.ts";
 import {
   addCommentShape,
   createCollectionShape,
   deleteRecordShape,
+  getCollectionSchemaShape,
   getHistoryShape,
   getRecordShape,
   listCommentsShape,
   listCollectionsShape,
+  migrateRecordShape,
   saveRecordShape,
   searchRecordsShape,
+  setCollectionSchemaShape,
   updateRecordShape,
 } from "./schema.ts";
 
@@ -34,7 +37,11 @@ function guard<T>(fn: (args: T) => unknown): (args: T) => CallToolResult {
     try {
       return ok(fn(args));
     } catch (err) {
-      if (err instanceof NotFoundError || err instanceof ConflictError) {
+      if (
+        err instanceof NotFoundError ||
+        err instanceof ConflictError ||
+        err instanceof ValidationError
+      ) {
         return fail(`${err.name}: ${err.message}`);
       }
       const message = err instanceof Error ? err.message : String(err);
@@ -66,10 +73,47 @@ export function createMcpServer(repo: Repository): McpServer {
     {
       title: "Create collection",
       description:
-        "Create a named collection (namespace/topic) to group curated records. Collections are also created automatically on first save_record.",
+        "Create a named collection (namespace/topic) to group curated records. Optionally attach a JSON Schema that records must satisfy. Collections are also created automatically on first save_record.",
       inputSchema: createCollectionShape,
     },
-    guard((a) => repo.createCollection(a.name, a.description)),
+    guard((a) => repo.createCollection(a.name, a.description, a.schema)),
+  );
+
+  server.registerTool(
+    "set_collection_schema",
+    {
+      title: "Set / evolve collection schema",
+      description:
+        "Attach or evolve a collection's JSON Schema. Each call appends a new immutable schema version and makes it current; subsequent saves/updates must satisfy it. Existing records keep the version they were written against until migrated (see migrate_record).",
+      inputSchema: setCollectionSchemaShape,
+    },
+    guard((a) => repo.setCollectionSchema(a.collection, a.schema, a.author)),
+  );
+
+  server.registerTool(
+    "get_collection_schema",
+    {
+      title: "Get collection schema",
+      description:
+        "Fetch a collection's current JSON Schema (or a specific version). Returns null if the collection has no schema.",
+      inputSchema: getCollectionSchemaShape,
+      annotations: { readOnlyHint: true },
+    },
+    guard((a) => ({
+      current: repo.getCollectionSchema(a.collection, a.version),
+      versions: repo.listCollectionSchemas(a.collection).map((s) => s.version),
+    })),
+  );
+
+  server.registerTool(
+    "migrate_record",
+    {
+      title: "Migrate record to current schema",
+      description:
+        "Bring a record up to its collection's current schema version. Optionally pass replacement `content`; the result is validated against the latest schema and the record is re-stamped. Fails if the content does not satisfy the current schema.",
+      inputSchema: migrateRecordShape,
+    },
+    guard((a) => repo.migrateRecord({ id: a.id, content: a.content, author: a.author })),
   );
 
   server.registerTool(

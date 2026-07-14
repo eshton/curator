@@ -2,6 +2,8 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import type { CuratorConfig } from "./config.ts";
 import { MCP_PATH } from "./config.ts";
 import { createMcpServer, CURATOR_VERSION } from "./server.ts";
+import { handleApiRequest } from "./api.ts";
+import { WEBUI_HTML } from "./webui.ts";
 import type { Repository } from "./repository.ts";
 
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
@@ -85,6 +87,22 @@ export async function startHttpServer(
         const rejected = checkRequest(req, cfg);
         if (rejected) return rejected;
         return handleMcpRequest(req, repo);
+      }
+
+      if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
+        const rejected = checkRequest(req, cfg);
+        if (rejected) return rejected;
+        return handleApiRequest(req, repo);
+      }
+
+      // Web UI shell. Served without a token (top-level navigation cannot send
+      // one); the page then supplies the token on its /api calls. Still gated
+      // to loopback by the socket binding and Host check.
+      if (url.pathname === "/" || url.pathname === "/index.html") {
+        if (!isLocalHost(req.headers.get("host"))) {
+          return json({ error: "Forbidden" }, 403);
+        }
+        return new Response(WEBUI_HTML, { headers: { "content-type": "text/html; charset=utf-8" } });
       }
 
       return json({ error: "Not found" }, 404);
